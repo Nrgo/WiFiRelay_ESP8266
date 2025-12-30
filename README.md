@@ -1,6 +1,6 @@
 # WiFiRelay_ESP8266
 WiFi Relay ESP8266
 
-5 RELAYS
+5 Relays
 
-10 SCHEDULEs
+10 Schedules
