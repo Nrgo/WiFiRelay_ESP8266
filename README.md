@@ -7,9 +7,8 @@
 
 *WiFi Manager
 
-Скачиваем - прошиваем - подключаемся к сети ShelfLight (пароль 12345678) - переходим по адресу 192.168.4.1 - УРА, РАБОТАЕТ
-
-<img width="545" height="474" alt="First Connect" src="https://github.com/user-attachments/assets/d95a5f87-351b-4001-bd19-dad4dd85d032" />
-<img width="531" height="660" alt="MainPage" src="https://github.com/user-attachments/assets/e4607511-7798-418b-b284-ed0302f3ec18" />
-<img width="518" height="552" alt="Schedules" src="https://github.com/user-attachments/assets/86b7afa6-76b7-4372-859c-4926c77a0c3d" />
-<img width="496" height="445" alt="WiFi_Manager" src="https://github.com/user-attachments/assets/21dd875a-b1e4-4e4f-bf41-b791a8b36539" />
+<img width="720" height="1560" alt="1" src="https://github.com/user-attachments/assets/9fd33c66-9ff5-4b9f-8a87-f81e467eeb09" />
+<img width="720" height="1560" alt="2" src="https://github.com/user-attachments/assets/b614c2f6-199c-4efa-b1cc-c0d6b355f67e" />
+<img width="720" height="1560" alt="3" src="https://github.com/user-attachments/assets/2aaf85db-bb9f-493c-8699-332318f23ee7" />
+<img width="720" height="1560" alt="4" src="https://github.com/user-attachments/assets/3753cff3-c006-4729-aa80-722846fc0e77" />
+<img width="720" height="1560" alt="5" src="https://github.com/user-attachments/assets/7f7e25b9-1619-47af-a6f9-afb0f88655ce" />
