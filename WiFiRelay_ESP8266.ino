@@ -2,44 +2,47 @@
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <EEPROM.h>
+#include <time.h>
 
-// Конфигурация
-#define NUM_SHELVES 5
+// Configuration
+#define NUM_RELAYS 5
 #define SCHEDULE_COUNT 10
 #define EEPROM_SIZE 512
+#define TIME_ZONE 3  // UTC+3 для Москвы
 
-// Пины реле (можно изменить под вашу схему)
-const int relayPins[NUM_SHELVES] = {D1, D2, D5, D6, D7};
+// Relay pins
+const uint8_t relayPins[NUM_RELAYS] = {D1, D2, D5, D6, D7};
 
-// Структура для расписания
+// Schedule structure
 struct Schedule {
-  uint8_t shelf;        // Полка (0-4)
-  uint8_t hourOn;       // Час включения
-  uint8_t minuteOn;     // Минута включения
-  uint8_t hourOff;      // Час выключения
-  uint8_t minuteOff;    // Минута выключения
-  uint8_t days;         // Битовая маска дней (бит 0 - понедельник)
-  bool enabled;         // Активно
-};
+  uint8_t relay : 3;      // 3 bits для 5 реле (0-4)
+  uint8_t hourOn : 5;     // 5 bits (0-23)
+  uint8_t minuteOn : 6;   // 6 bits (0-59)
+  uint8_t hourOff : 5;    // 5 bits
+  uint8_t minuteOff : 6;  // 6 bits
+  uint8_t days : 7;       // 7 bits для дней недели
+  bool enabled : 1;
+} __attribute__((packed));
 
 ESP8266WebServer server(80);
 Schedule schedules[SCHEDULE_COUNT];
-bool relayStates[NUM_SHELVES] = {false, false, false, false, false};
+bool relayStates[NUM_RELAYS] = {false, false, false, false, false};
 
-// HTML главной страницы
-const char* mainPage = R"rawliteral(
+// HTML main page
+const char mainPage[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
-    <title>Управление освещением</title>
+    <title>Relay Controller</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial; margin: 20px; }
-        h1 { color: #333; }
-        .shelf { margin: 10px 0; padding: 10px; border: 1px solid #ddd; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        .relay { margin: 15px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9; }
         .button { 
-            padding: 10px 15px; 
+            padding: 10px 20px; 
             margin: 5px; 
             border: none; 
             background: #4CAF50; 
@@ -47,188 +50,308 @@ const char* mainPage = R"rawliteral(
             cursor: pointer;
             font-size: 14px;
             border-radius: 4px;
+            min-width: 120px;
         }
+        .button:hover { opacity: 0.9; }
         .button.off { background: #f44336; }
-        .nav { margin: 20px 0; }
+        .nav { margin: 20px 0; padding: 10px; background: #e3f2fd; border-radius: 4px; }
         .nav a { 
-            margin: 0 10px; 
+            margin: 0 15px; 
             text-decoration: none; 
             color: #2196F3; 
             font-weight: bold;
-        }
-        .status { 
-            margin: 10px 0; 
-            padding: 15px; 
-            background: #e3f2fd; 
+            padding: 8px 16px;
             border-radius: 4px;
-            border: 1px solid #bbdefb;
         }
-        .config-page { max-width: 500px; margin: 0 auto; }
-        .config-box { 
-            padding: 20px; 
-            border: 1px solid #ddd; 
+        .nav a:hover { background: #bbdefb; }
+        .status { 
+            margin: 15px 0; 
+            padding: 15px; 
+            background: #e8f5e9; 
+            border-radius: 4px;
+            border: 1px solid #c8e6c9;
+        }
+        .relay-number { width: 120px; font-weight: bold; font-size: 16px; display: inline-block; }
+        .relay-status { margin-left: 20px; padding: 5px 10px; border-radius: 4px; font-weight: bold; display: inline-block; }
+        .status-on { background: #c8e6c9; color: #2e7d32; }
+        .status-off { background: #ffebee; color: #c62828; }
+        .actions { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; }
+        .group-button { padding: 12px 24px; font-size: 16px; margin-right: 15px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .device-info { font-size: 14px; color: #666; }
+        .current-time { 
+            background: #2196F3; 
+            color: white; 
+            padding: 10px; 
             border-radius: 5px; 
-            margin: 20px 0;
+            text-align: center;
+            margin: 15px 0;
+            font-family: monospace;
+            font-size: 18px;
         }
     </style>
 </head>
 <body>
-    <h1>Управление освещением стеллажа</h1>
-    
-    <div class="nav">
-        <a href="/">Главная</a>
-        <a href="/schedule">Расписание</a>
-        <a href="/config">Настройки WiFi</a>
-    </div>
-    
-    <div class="status">
-        IP адрес: %IP%<br>
-        WiFi: %WIFISTATUS%<br>
-        Имя сети: %SSID%
-    </div>
-    
-    <h2>Ручное управление:</h2>
-    %SHELVES%
-    
-    <div style="margin-top: 20px;">
-        <button class="button" onclick="controlAll(true)">Включить все</button>
-        <button class="button off" onclick="controlAll(false)">Выключить все</button>
+    <div class="container">
+        <div class="header">
+            <h1>Universal Relay Controller</h1>
+            <div class="device-info">Device ID: %DEVICE_ID%</div>
+        </div>
+        
+        <div class="nav">
+            <a href="/">Dashboard</a>
+            <a href="/schedule">Schedules</a>
+            <a href="/config">WiFi Settings</a>
+        </div>
+        
+        <div class="current-time" id="currentTime">
+            Loading time...
+        </div>
+        
+        <div class="status">
+            <strong>System Status:</strong><br>
+            IP Address: %IP%<br>
+            WiFi: %WIFISTATUS%<br>
+            Network: %SSID%<br>
+            Uptime: %UPTIME%
+        </div>
+        
+        <h2>Manual Relay Control:</h2>
+        %RELAYS%
+        
+        <div class="actions">
+            <h3>Group Actions:</h3>
+            <button class="button group-button" onclick="controlAll(true)">Turn All Relays ON</button>
+            <button class="button off group-button" onclick="controlAll(false)">Turn All Relays OFF</button>
+        </div>
     </div>
     
     <script>
-    function toggleRelay(shelf, btn) {
-        var newState = btn.innerText === 'Включить';
-        fetch('/control?shelf=' + shelf + '&state=' + (newState ? '1' : '0'));
-        btn.innerText = newState ? 'Выключить' : 'Включить';
-        btn.className = newState ? 'button off' : 'button';
+    // Update current time every second
+    function updateTime() {
+        var now = new Date();
+        var dateStr = now.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+        });
+        var timeStr = now.toLocaleTimeString('en-US', { hour12: false });
+        document.getElementById('currentTime').innerHTML = 
+            '<strong>' + dateStr + '</strong><br>' + timeStr;
+    }
+    
+    // Update time immediately and then every second
+    updateTime();
+    setInterval(updateTime, 1000);
+    
+    function toggleRelay(relay, btn) {
+        var newState = btn.innerText === 'Turn ON';
+        console.log('Toggling relay ' + relay + ' to ' + (newState ? 'ON' : 'OFF'));
+        
+        fetch('/control?relay=' + relay + '&state=' + (newState ? '1' : '0'))
+            .then(response => {
+                if(response.ok) {
+                    btn.innerText = newState ? 'Turn OFF' : 'Turn ON';
+                    btn.className = newState ? 'button off' : 'button';
+                    var statusSpan = document.getElementById('status' + relay);
+                    if(statusSpan) {
+                        statusSpan.innerText = newState ? 'ON' : 'OFF';
+                        statusSpan.className = 'relay-status ' + (newState ? 'status-on' : 'status-off');
+                    }
+                } else {
+                    console.error('Failed to control relay');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
     }
     
     function controlAll(state) {
-        var buttons = document.querySelectorAll('[id^="btn"]');
-        buttons.forEach(function(btn) {
-            var shelf = btn.id.replace('btn', '');
-            fetch('/control?shelf=' + shelf + '&state=' + (state ? '1' : '0'));
-            btn.innerText = state ? 'Выключить' : 'Включить';
-            btn.className = state ? 'button off' : 'button';
-        });
+        console.log('Turning all relays ' + (state ? 'ON' : 'OFF'));
+        
+        for(var i = 0; i < 5; i++) {
+            var btn = document.getElementById('btn' + i);
+            if(btn) {
+                fetch('/control?relay=' + i + '&state=' + (state ? '1' : '0'))
+                    .then(response => {
+                        if(response.ok) {
+                            btn.innerText = state ? 'Turn OFF' : 'Turn ON';
+                            btn.className = state ? 'button off' : 'button';
+                            var statusSpan = document.getElementById('status' + i);
+                            if(statusSpan) {
+                                statusSpan.innerText = state ? 'ON' : 'OFF';
+                                statusSpan.className = 'relay-status ' + (state ? 'status-on' : 'status-off');
+                            }
+                        }
+                    });
+            }
+        }
     }
     </script>
 </body>
 </html>
 )rawliteral";
 
-// HTML страницы расписания
-const char* schedulePage = R"rawliteral(
+// HTML schedule page
+const char schedulePage[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
-    <title>Расписание</title>
+    <title>Relay Schedules</title>
     <meta charset="utf-8">
     <style>
-        body { font-family: Arial; margin: 20px; }
-        .form-group { margin: 10px 0; }
-        label { display: inline-block; width: 120px; }
-        input, select { padding: 5px; }
-        .days label { width: auto; margin-right: 10px; }
-        .schedule-item { 
-            margin: 10px 0; 
-            padding: 15px; 
-            border: 1px solid #ccc; 
-            border-radius: 4px;
-            background: #f9f9f9;
-        }
-        .button { 
-            padding: 8px 15px; 
-            margin: 5px; 
-            border: none; 
-            background: #4CAF50; 
-            color: white; 
-            cursor: pointer;
-            border-radius: 4px;
-        }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
+        .form-group { margin: 15px 0; }
+        label { display: inline-block; width: 150px; font-weight: bold; }
+        input, select { padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+        .schedule-item { margin: 15px 0; padding: 20px; border: 1px solid #ccc; border-radius: 4px; background: #f9f9f9; }
+        .button { padding: 10px 20px; margin: 5px; border: none; background: #4CAF50; color: white; cursor: pointer; border-radius: 4px; }
+        .button:hover { opacity: 0.9; }
         .button.delete { background: #f44336; }
-        .back-link { display: inline-block; margin-bottom: 20px; }
+        .button.clear { background: #9E9E9E; }
+        .back-link { display: inline-block; margin-bottom: 20px; text-decoration: none; color: #2196F3; font-weight: bold; }
+        .schedule-form { padding: 25px; border: 1px solid #ddd; border-radius: 4px; background: white; }
+        .time-input { width: 70px; text-align: center; }
+        .no-schedules { padding: 30px; text-align: center; color: #666; font-style: italic; }
+        .day-checkboxes { display: flex; flex-wrap: wrap; gap: 15px; margin: 10px 0; }
+        .schedule-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .schedule-time { background: #e3f2fd; padding: 5px 10px; border-radius: 4px; margin-right: 10px; }
+        .current-time-info {
+            background: #e3f2fd;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
-    <h1>Настройка расписания</h1>
-    <a href="/" class="back-link">← Назад на главную</a>
-    
-    <h2>Добавить расписание:</h2>
-    <div style="padding: 15px; border: 1px solid #ddd; border-radius: 4px; max-width: 500px;">
-        <form id="addForm">
-            <div class="form-group">
-                <label>Полка:</label>
-                <select id="shelf" style="width: 150px;">
-                    <option value="0">Полка 1</option>
-                    <option value="1">Полка 2</option>
-                    <option value="2">Полка 3</option>
-                    <option value="3">Полка 4</option>
-                    <option value="4">Полка 5</option>
-                </select>
-            </div>
-            
-            <div class="form-group">
-                <label>Время включения:</label>
-                <input type="number" id="hourOn" min="0" max="23" value="8" style="width:60px"> :
-                <input type="number" id="minuteOn" min="0" max="59" value="0" style="width:60px">
-            </div>
-            
-            <div class="form-group">
-                <label>Время выключения:</label>
-                <input type="number" id="hourOff" min="0" max="23" value="20" style="width:60px"> :
-                <input type="number" id="minuteOff" min="0" max="59" value="0" style="width:60px">
-            </div>
-            
-            <div class="form-group days">
-                <label style="display:block; margin-bottom:5px;">Дни недели:</label>
-                <label><input type="checkbox" name="day" value="1" checked> Пн</label>
-                <label><input type="checkbox" name="day" value="2" checked> Вт</label>
-                <label><input type="checkbox" name="day" value="4" checked> Ср</label>
-                <label><input type="checkbox" name="day" value="8" checked> Чт</label>
-                <label><input type="checkbox" name="day" value="16" checked> Пт</label>
-                <label><input type="checkbox" name="day" value="32"> Сб</label>
-                <label><input type="checkbox" name="day" value="64"> Вс</label>
-            </div>
-            
-            <div class="form-group">
-                <label><input type="checkbox" id="enabled" checked> Активно</label>
-            </div>
-            
-            <button type="button" class="button" onclick="addSchedule()">Добавить расписание</button>
-        </form>
-    </div>
-    
-    <h2>Текущие расписания:</h2>
-    <div id="schedules">
-        %SCHEDULES%
+    <div class="container">
+        <h1>Relay Schedules</h1>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        
+        <div class="current-time-info">
+            <strong>Current Device Time:</strong><br>
+            <span id="deviceTime">Loading...</span>
+        </div>
+        
+        <div class="schedule-form">
+            <h2>Add New Schedule</h2>
+            <form id="addForm">
+                <div class="form-group">
+                    <label>Select Relay:</label>
+                    <select id="relay" style="width: 200px;">
+                        <option value="0">Relay 1</option>
+                        <option value="1">Relay 2</option>
+                        <option value="2">Relay 3</option>
+                        <option value="3">Relay 4</option>
+                        <option value="4">Relay 5</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>Turn ON Time:</label>
+                    <input type="number" id="hourOn" class="time-input" min="0" max="23" value="8"> :
+                    <input type="number" id="minuteOn" class="time-input" min="0" max="59" value="0">
+                </div>
+                
+                <div class="form-group">
+                    <label>Turn OFF Time:</label>
+                    <input type="number" id="hourOff" class="time-input" min="0" max="23" value="20"> :
+                    <input type="number" id="minuteOff" class="time-input" min="0" max="59" value="0">
+                </div>
+                
+                <div class="form-group">
+                    <label>Days of Week:</label>
+                    <div class="day-checkboxes">
+                        <label><input type="checkbox" name="day" value="1" checked> Mon</label>
+                        <label><input type="checkbox" name="day" value="2" checked> Tue</label>
+                        <label><input type="checkbox" name="day" value="4" checked> Wed</label>
+                        <label><input type="checkbox" name="day" value="8" checked> Thu</label>
+                        <label><input type="checkbox" name="day" value="16" checked> Fri</label>
+                        <label><input type="checkbox" name="day" value="32"> Sat</label>
+                        <label><input type="checkbox" name="day" value="64"> Sun</label>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label><input type="checkbox" id="enabled" checked> Activate schedule</label>
+                </div>
+                
+                <button type="button" class="button" onclick="addSchedule()">Add Schedule</button>
+                <button type="button" class="button clear" onclick="clearForm()">Clear Form</button>
+            </form>
+        </div>
+        
+        <h2 style="margin-top: 40px;">Active Schedules:</h2>
+        <div id="schedules">
+            %SCHEDULES%
+        </div>
     </div>
     
     <script>
+    // Fetch device time from server
+    function fetchDeviceTime() {
+        fetch('/gettime')
+            .then(response => response.text())
+            .then(timeStr => {
+                document.getElementById('deviceTime').textContent = timeStr;
+            })
+            .catch(error => {
+                document.getElementById('deviceTime').textContent = 'Error loading time';
+            });
+    }
+    
+    // Update device time every 30 seconds
+    fetchDeviceTime();
+    setInterval(fetchDeviceTime, 30000);
+    
     function addSchedule() {
-        let shelf = document.getElementById('shelf').value;
+        let relay = document.getElementById('relay').value;
         let hourOn = document.getElementById('hourOn').value;
         let minuteOn = document.getElementById('minuteOn').value;
         let hourOff = document.getElementById('hourOff').value;
         let minuteOff = document.getElementById('minuteOff').value;
         let enabled = document.getElementById('enabled').checked ? 1 : 0;
         
-        // Собираем дни недели в битовую маску
         let days = 0;
         document.getElementsByName('day').forEach(cb => {
             if(cb.checked) days += parseInt(cb.value);
         });
         
-        let url = '/addschedule?shelf=' + shelf + 
+        let url = '/addschedule?relay=' + relay + 
                  '&hourOn=' + hourOn + '&minuteOn=' + minuteOn +
                  '&hourOff=' + hourOff + '&minuteOff=' + minuteOff +
                  '&days=' + days + '&enabled=' + enabled;
         
-        fetch(url).then(() => location.reload());
+        fetch(url).then(response => {
+            if(response.ok) {
+                location.reload();
+            } else {
+                response.text().then(text => {
+                    alert('Error: ' + text);
+                });
+            }
+        });
+    }
+    
+    function clearForm() {
+        document.getElementById('hourOn').value = '8';
+        document.getElementById('minuteOn').value = '0';
+        document.getElementById('hourOff').value = '20';
+        document.getElementById('minuteOff').value = '0';
+        document.getElementById('enabled').checked = true;
+        document.getElementsByName('day').forEach(cb => {
+            cb.checked = cb.value <= 16;
+        });
     }
     
     function deleteSchedule(index) {
-        if(confirm('Удалить расписание?')) {
+        if(confirm('Delete this schedule?')) {
             fetch('/deleteschedule?index=' + index).then(() => location.reload());
         }
     }
@@ -237,91 +360,75 @@ const char* schedulePage = R"rawliteral(
 </html>
 )rawliteral";
 
-// HTML страницы настроек WiFi
-const char* configPage = R"rawliteral(
+// HTML WiFi settings page
+const char configPage[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
-    <title>Настройки WiFi</title>
+    <title>WiFi Settings</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial; margin: 20px; }
-        .config-box { 
-            max-width: 500px; 
-            margin: 0 auto; 
-            padding: 20px; 
-            border: 1px solid #ddd; 
-            border-radius: 5px;
-        }
-        .info-box {
-            padding: 15px;
-            background: #e3f2fd;
-            border-radius: 4px;
-            margin: 20px 0;
-        }
-        .button { 
-            padding: 12px 20px; 
-            margin: 10px 5px; 
-            border: none; 
-            background: #4CAF50; 
-            color: white; 
-            cursor: pointer;
-            font-size: 16px;
-            border-radius: 4px;
-            width: 100%;
-            box-sizing: border-box;
-        }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
+        .info-box { padding: 20px; background: #e8f5e9; border-radius: 8px; margin: 20px 0; }
+        .warning-box { padding: 20px; background: #fff3e0; border-radius: 8px; margin: 20px 0; color: #e65100; }
+        .button { padding: 15px 25px; margin: 15px 0; border: none; background: #4CAF50; color: white; cursor: pointer; font-size: 16px; border-radius: 6px; width: 100%; }
+        .button:hover { opacity: 0.9; }
         .button.reset { background: #f44336; }
         .button.wifi { background: #2196F3; }
-        .back-link { display: inline-block; margin-bottom: 20px; }
-        .warning {
-            background: #ffebee;
-            color: #c62828;
-            padding: 10px;
-            border-radius: 4px;
-            margin: 15px 0;
-        }
+        .back-link { display: inline-block; margin-bottom: 20px; text-decoration: none; color: #2196F3; font-weight: bold; }
+        h1 { color: #333; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
+        .status-item { margin: 10px 0; padding: 8px; background: white; border-radius: 4px; }
+        .status-label { display: inline-block; width: 120px; font-weight: bold; color: #555; }
     </style>
 </head>
 <body>
-    <h1>Настройки WiFi</h1>
-    <a href="/" class="back-link">← Назад на главную</a>
-    
-    <div class="config-box">
+    <div class="container">
+        <h1>WiFi Settings</h1>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        
         <div class="info-box">
-            <strong>Текущие настройки:</strong><br>
-            SSID: %CURRENT_SSID%<br>
-            Статус: %WIFI_STATUS%<br>
-            IP: %CURRENT_IP%
+            <h3>Current Connection Status:</h3>
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span style="color: %WIFI_COLOR%; font-weight: bold;">%WIFI_STATUS%</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">WiFi Network:</span>
+                %CURRENT_SSID%
+            </div>
+            <div class="status-item">
+                <span class="status-label">IP Address:</span>
+                %CURRENT_IP%
+            </div>
         </div>
         
-        <div class="warning">
-            <strong>Внимание:</strong> После настройки WiFi устройство перезагрузится.
+        <div class="warning-box">
+            <strong>⚠️ Important:</strong><br>
+            Changing WiFi settings will cause the device to restart.
         </div>
         
-        <h3>Действия:</h3>
+        <h3>Actions:</h3>
         
-        <p><button class="button wifi" onclick="startWiFiConfig()">Настроить WiFi подключение</button></p>
+        <button class="button wifi" onclick="startWiFiConfig()">Configure WiFi Connection</button>
         
-        <p><button class="button reset" onclick="resetWiFi()">Сбросить настройки WiFi</button></p>
-        
-        <p><small>Для настройки подключитесь к точке доступа "ShelfLight" (пароль: 12345678) и откройте 192.168.4.1</small></p>
+        <button class="button reset" onclick="resetWiFi()">Reset WiFi Settings</button>
     </div>
     
     <script>
     function startWiFiConfig() {
-        if(confirm('Устройство перейдет в режим настройки WiFi. Продолжить?')) {
+        if(confirm('Device will enter WiFi configuration mode.\n\nConnect to network "RelayController" and open 192.168.4.1\n\nContinue?')) {
             fetch('/startwificonfig').then(() => {
-                alert('Переход в режим настройки WiFi. Подключитесь к точке доступа "ShelfLight"');
+                alert('Entering WiFi configuration mode.');
             });
         }
     }
     
     function resetWiFi() {
-        if(confirm('ВНИМАНИЕ: Все настройки WiFi будут сброшены! Продолжить?')) {
+        if(confirm('⚠️ WARNING: All WiFi settings will be reset!\n\nContinue?')) {
             fetch('/resetwifi').then(() => {
-                alert('Настройки WiFi сброшены. Устройство перезагружается...');
+                alert('WiFi settings reset. Device is restarting...');
             });
         }
     }
@@ -330,149 +437,206 @@ const char* configPage = R"rawliteral(
 </html>
 )rawliteral";
 
-// Функции работы с EEPROM
+// Helper functions
+String formatTime(int value) {
+    if(value < 10) {
+        return "0" + String(value);
+    }
+    return String(value);
+}
+
+String getFormattedTime() {
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    if(timeinfo.tm_year < 121) { // Year < 2021
+        return "Time not synchronized";
+    }
+    
+    String timeStr = String(1900 + timeinfo.tm_year) + "-" +
+                    formatTime(timeinfo.tm_mon + 1) + "-" +
+                    formatTime(timeinfo.tm_mday) + " " +
+                    formatTime(timeinfo.tm_hour) + ":" +
+                    formatTime(timeinfo.tm_min) + ":" +
+                    formatTime(timeinfo.tm_sec);
+    
+    return timeStr;
+}
+
+String getDayName(int day) {
+    String days[] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
+    if(day >= 0 && day < 7) return days[day];
+    return "Unknown";
+}
+
+// EEPROM functions
 void saveSchedules() {
     EEPROM.begin(EEPROM_SIZE);
     
-    // Сохраняем количество активных расписаний
     int count = 0;
     for(int i = 0; i < SCHEDULE_COUNT; i++) {
         if(schedules[i].enabled) count++;
     }
-    EEPROM.write(0, count);
     
-    // Сохраняем каждое активное расписание
+    EEPROM.write(0, count);
+    Serial.println("Saving schedules count: " + String(count));
+    
     int addr = 1;
     for(int i = 0; i < SCHEDULE_COUNT; i++) {
         if(schedules[i].enabled) {
-            EEPROM.write(addr++, i); // Сохраняем индекс для порядка
-            EEPROM.write(addr++, schedules[i].shelf);
-            EEPROM.write(addr++, schedules[i].hourOn);
-            EEPROM.write(addr++, schedules[i].minuteOn);
-            EEPROM.write(addr++, schedules[i].hourOff);
-            EEPROM.write(addr++, schedules[i].minuteOff);
-            EEPROM.write(addr++, schedules[i].days);
+            EEPROM.write(addr++, i);
+            EEPROM.write(addr++, *(uint8_t*)&schedules[i]);
+            EEPROM.write(addr++, *((uint8_t*)&schedules[i] + 1));
+            Serial.println("Saved schedule " + String(i) + " for relay " + String(schedules[i].relay + 1));
         }
     }
     
     EEPROM.commit();
-    Serial.println("Расписания сохранены");
+    EEPROM.end();
+    Serial.println("Schedules saved to EEPROM");
 }
 
 void loadSchedules() {
     EEPROM.begin(EEPROM_SIZE);
     
-    // Очищаем все расписания
+    // Clear all schedules
     for(int i = 0; i < SCHEDULE_COUNT; i++) {
         schedules[i].enabled = false;
     }
     
     int count = EEPROM.read(0);
-    if(count > SCHEDULE_COUNT) count = 0;
+    Serial.println("Loading schedules count from EEPROM: " + String(count));
     
     int addr = 1;
-    for(int i = 0; i < count; i++) {
+    for(int i = 0; i < count && i < SCHEDULE_COUNT; i++) {
         int index = EEPROM.read(addr++);
         if(index < SCHEDULE_COUNT) {
-            schedules[index].shelf = EEPROM.read(addr++);
-            schedules[index].hourOn = EEPROM.read(addr++);
-            schedules[index].minuteOn = EEPROM.read(addr++);
-            schedules[index].hourOff = EEPROM.read(addr++);
-            schedules[index].minuteOff = EEPROM.read(addr++);
-            schedules[index].days = EEPROM.read(addr++);
+            *(uint8_t*)&schedules[index] = EEPROM.read(addr++);
+            *((uint8_t*)&schedules[index] + 1) = EEPROM.read(addr++);
             schedules[index].enabled = true;
+            Serial.println("Loaded schedule " + String(index) + " for relay " + String(schedules[index].relay + 1));
         } else {
-            addr += 6; // Пропускаем 6 байт
+            addr += 2;
         }
     }
     
-    Serial.println("Загружено расписаний: " + String(count));
+    EEPROM.end();
 }
 
-// Обработчики веб-сервера
+// Web server handlers
 void handleRoot() {
-    String html = mainPage;
+    String html = FPSTR(mainPage);
     html.replace("%IP%", WiFi.localIP().toString());
-    html.replace("%WIFISTATUS%", WiFi.status() == WL_CONNECTED ? "Подключено" : "Нет подключения");
-    html.replace("%SSID%", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "Не подключено");
+    html.replace("%WIFISTATUS%", WiFi.status() == WL_CONNECTED ? "Connected" : "Not Connected");
+    html.replace("%SSID%", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "Not Connected");
     
-    String shelvesHtml = "";
-    for(int i = 0; i < NUM_SHELVES; i++) {
-        shelvesHtml += "<div class='shelf'>";
-        shelvesHtml += "<strong>Полка " + String(i+1) + ":</strong> ";
-        shelvesHtml += "<button id='btn" + String(i) + "' class='";
-        shelvesHtml += relayStates[i] ? "button off" : "button";
-        shelvesHtml += "' onclick='toggleRelay(" + String(i) + ", this)'>";
-        shelvesHtml += relayStates[i] ? "Выключить" : "Включить";
-        shelvesHtml += "</button></div>";
+    unsigned long seconds = millis() / 1000;
+    unsigned long minutes = seconds / 60;
+    unsigned long hours = minutes / 60;
+    unsigned long days = hours / 24;
+    html.replace("%UPTIME%", String(days) + "d " + String(hours % 24) + "h " + String(minutes % 60) + "m");
+    
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    html.replace("%DEVICE_ID%", mac.substring(6));
+    
+    String relaysHtml = "";
+    for(int i = 0; i < NUM_RELAYS; i++) {
+        relaysHtml += "<div class='relay'>";
+        relaysHtml += "<span class='relay-number'>Relay " + String(i+1) + ":</span> ";
+        relaysHtml += "<button id='btn" + String(i) + "' class='";
+        relaysHtml += relayStates[i] ? "button off" : "button";
+        relaysHtml += "' onclick='toggleRelay(" + String(i) + ", this)'>";
+        relaysHtml += relayStates[i] ? "Turn OFF" : "Turn ON";
+        relaysHtml += "</button>";
+        relaysHtml += "<span id='status" + String(i) + "' class='relay-status ";
+        relaysHtml += relayStates[i] ? "status-on'>ON" : "status-off'>OFF";
+        relaysHtml += "</span>";
+        relaysHtml += "</div>";
     }
     
-    html.replace("%SHELVES%", shelvesHtml);
+    html.replace("%RELAYS%", relaysHtml);
     server.send(200, "text/html", html);
 }
 
 void handleControl() {
-    if(server.hasArg("shelf") && server.hasArg("state")) {
-        int shelf = server.arg("shelf").toInt();
+    if(server.hasArg("relay") && server.hasArg("state")) {
+        int relay = server.arg("relay").toInt();
         bool state = server.arg("state") == "1";
         
-        if(shelf >= 0 && shelf < NUM_SHELVES) {
-            relayStates[shelf] = state;
-            digitalWrite(relayPins[shelf], state ? LOW : HIGH); // LOW включает реле (активный низкий уровень)
-            Serial.println("Полка " + String(shelf+1) + ": " + (state ? "ВКЛ" : "ВЫКЛ"));
+        if(relay >= 0 && relay < NUM_RELAYS) {
+            relayStates[relay] = state;
+            digitalWrite(relayPins[relay], state ? LOW : HIGH);
+            Serial.println("Manual control: Relay " + String(relay+1) + ": " + (state ? "ON" : "OFF"));
         }
     }
     server.send(200, "text/plain", "OK");
 }
 
 void handleSchedule() {
-    String html = schedulePage;
+    String html = FPSTR(schedulePage);
     
     String schedulesHtml = "";
-    String dayNames[] = {"Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"};
     
     for(int i = 0; i < SCHEDULE_COUNT; i++) {
         if(schedules[i].enabled) {
             schedulesHtml += "<div class='schedule-item'>";
-            schedulesHtml += "<strong>Полка " + String(schedules[i].shelf + 1) + "</strong><br>";
+            schedulesHtml += "<div class='schedule-header'>";
+            schedulesHtml += "<strong>Relay " + String(schedules[i].relay + 1) + "</strong>";
+            schedulesHtml += "<button class='button delete' onclick='deleteSchedule(" + String(i) + ")'>Delete</button>";
+            schedulesHtml += "</div>";
             
-            // Исправленная конкатенация строк
-            schedulesHtml += String("Вкл: ") + 
-                           (schedules[i].hourOn < 10 ? "0" : "") + 
-                           String(schedules[i].hourOn) + ":" + 
-                           (schedules[i].minuteOn < 10 ? "0" : "") + 
-                           String(schedules[i].minuteOn);
+            schedulesHtml += "<div style='margin: 10px 0;'>";
+            schedulesHtml += "<span class='schedule-time'>ON: ";
+            schedulesHtml += formatTime(schedules[i].hourOn);
+            schedulesHtml += ":";
+            schedulesHtml += formatTime(schedules[i].minuteOn);
+            schedulesHtml += "</span>";
             
-            schedulesHtml += String(" | Выкл: ") + 
-                           (schedules[i].hourOff < 10 ? "0" : "") + 
-                           String(schedules[i].hourOff) + ":" + 
-                           (schedules[i].minuteOff < 10 ? "0" : "") + 
-                           String(schedules[i].minuteOff);
+            schedulesHtml += "<span class='schedule-time'>OFF: ";
+            schedulesHtml += formatTime(schedules[i].hourOff);
+            schedulesHtml += ":";
+            schedulesHtml += formatTime(schedules[i].minuteOff);
+            schedulesHtml += "</span>";
+            schedulesHtml += "</div>";
             
-            schedulesHtml += "<br>Дни: ";
+            schedulesHtml += "<div>Days: ";
+            String dayNames[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+            bool anyDay = false;
             
             for(int d = 0; d < 7; d++) {
                 if(schedules[i].days & (1 << d)) {
-                    schedulesHtml += dayNames[d] + " ";
+                    schedulesHtml += dayNames[d];
+                    schedulesHtml += " ";
+                    anyDay = true;
                 }
             }
             
-            schedulesHtml += "<br><button class='button delete' onclick='deleteSchedule(" + String(i) + ")'>Удалить</button>";
+            if(!anyDay) {
+                schedulesHtml += "None";
+            }
+            
+            schedulesHtml += "</div>";
             schedulesHtml += "</div>";
         }
     }
     
     if(schedulesHtml == "") {
-        schedulesHtml = "<p>Нет активных расписаний</p>";
+        schedulesHtml = "<div class='no-schedules'>No active schedules.<br>Add a schedule using the form above.</div>";
     }
     
     html.replace("%SCHEDULES%", schedulesHtml);
     server.send(200, "text/html", html);
 }
 
+void handleGetTime() {
+    String timeStr = getFormattedTime();
+    server.send(200, "text/plain", timeStr);
+}
+
 void handleAddSchedule() {
-    if(server.hasArg("shelf") && server.hasArg("hourOn")) {
-        // Находим свободный слот
+    if(server.hasArg("relay") && server.hasArg("hourOn")) {
         int freeIndex = -1;
         for(int i = 0; i < SCHEDULE_COUNT; i++) {
             if(!schedules[i].enabled) {
@@ -482,11 +646,11 @@ void handleAddSchedule() {
         }
         
         if(freeIndex == -1) {
-            server.send(200, "text/plain", "Достигнут лимит расписаний");
+            server.send(200, "text/plain", "Schedule limit reached");
             return;
         }
         
-        schedules[freeIndex].shelf = server.arg("shelf").toInt();
+        schedules[freeIndex].relay = server.arg("relay").toInt();
         schedules[freeIndex].hourOn = server.arg("hourOn").toInt();
         schedules[freeIndex].minuteOn = server.arg("minuteOn").toInt();
         schedules[freeIndex].hourOff = server.arg("hourOff").toInt();
@@ -494,8 +658,12 @@ void handleAddSchedule() {
         schedules[freeIndex].days = server.arg("days").toInt();
         schedules[freeIndex].enabled = server.arg("enabled").toInt() == 1;
         
+        Serial.println("Added schedule for relay " + String(schedules[freeIndex].relay + 1) + 
+                      " ON: " + String(schedules[freeIndex].hourOn) + ":" + String(schedules[freeIndex].minuteOn) +
+                      " OFF: " + String(schedules[freeIndex].hourOff) + ":" + String(schedules[freeIndex].minuteOff));
+        
         saveSchedules();
-        server.send(200, "text/plain", "OK");
+        server.send(200, "text/plain", "Schedule added");
     }
 }
 
@@ -511,23 +679,15 @@ void handleDeleteSchedule() {
 }
 
 void handleConfig() {
-    String html = configPage;
+    String html = FPSTR(configPage);
     
-    String wifiStatus = "";
-    String currentSSID = "";
-    String currentIP = "";
-    
-    if(WiFi.status() == WL_CONNECTED) {
-        wifiStatus = "Подключено";
-        currentSSID = WiFi.SSID();
-        currentIP = WiFi.localIP().toString();
-    } else {
-        wifiStatus = "Не подключено";
-        currentSSID = "Нет подключения";
-        currentIP = "Нет IP";
-    }
+    String wifiStatus = WiFi.status() == WL_CONNECTED ? "Connected ✓" : "Not Connected ✗";
+    String wifiColor = WiFi.status() == WL_CONNECTED ? "#4CAF50" : "#f44336";
+    String currentSSID = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "Not Connected";
+    String currentIP = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "No IP";
     
     html.replace("%WIFI_STATUS%", wifiStatus);
+    html.replace("%WIFI_COLOR%", wifiColor);
     html.replace("%CURRENT_SSID%", currentSSID);
     html.replace("%CURRENT_IP%", currentIP);
     
@@ -535,133 +695,142 @@ void handleConfig() {
 }
 
 void handleStartWiFiConfig() {
-    server.send(200, "text/html", 
-        "<html><body style='font-family: Arial; padding: 20px;'>"
-        "<h1>Настройка WiFi</h1>"
-        "<p>Устройство переходит в режим настройки WiFi.</p>"
-        "<p>Подключитесь к точке доступа:</p>"
-        "<ul>"
-        "<li>Имя сети: <strong>ShelfLight</strong></li>"
-        "<li>Пароль: <strong>12345678</strong></li>"
-        "</ul>"
-        "<p>Откройте браузер и перейдите по адресу: <strong>192.168.4.1</strong></p>"
-        "<p style='color: #f44336;'>Через 5 секунд устройство перезагрузится...</p>"
-        "</body></html>");
+    server.send(200, "text/plain", "Starting WiFi config...");
+    delay(1000);
     
-    delay(5000);
-    
-    // Запускаем WiFiManager в режиме конфигурации
     WiFiManager wifiManager;
-    wifiManager.setTimeout(180);
+    wifiManager.setTimeout(300);
     
-    if(!wifiManager.startConfigPortal("ShelfLight", "12345678")) {
-        Serial.println("Не удалось запустить портал конфигурации");
+    if(!wifiManager.startConfigPortal("RelayController", "12345678")) {
+        Serial.println("Failed to start config portal");
     }
     
     ESP.restart();
 }
 
 void handleResetWiFi() {
-    server.send(200, "text/html", 
-        "<html><body style='font-family: Arial; padding: 20px;'>"
-        "<h1>Сброс настроек WiFi</h1>"
-        "<p>Настройки WiFi сброшены.</p>"
-        "<p>Устройство перезагружается...</p>"
-        "<p>После перезагрузки подключитесь к точке доступа <strong>ShelfLight</strong> для настройки.</p>"
-        "</body></html>");
-    
+    server.send(200, "text/plain", "Resetting WiFi...");
     delay(1000);
     WiFiManager wifiManager;
     wifiManager.resetSettings();
     ESP.restart();
 }
 
-// Функция проверки расписаний
+// Schedule checking
 void checkSchedules() {
     static unsigned long lastCheck = 0;
-    if(millis() - lastCheck < 60000) return; // Проверяем каждую минуту
+    if(millis() - lastCheck < 10000) return; // Check every 10 seconds
     lastCheck = millis();
     
-    // Получаем текущее время
     time_t now = time(nullptr);
-    struct tm* timeinfo = localtime(&now);
-    if(timeinfo->tm_year < 121) return; // Если время не установлено (год < 2021)
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
     
-    int currentHour = timeinfo->tm_hour;
-    int currentMinute = timeinfo->tm_min;
-    int currentDay = (timeinfo->tm_wday + 6) % 7; // Преобразуем к 0=понедельник
+    if(timeinfo.tm_year < 121) {
+        Serial.println("Time not synchronized, skipping schedule check");
+        return;
+    }
     
-    // Проверяем бит дня недели (сдвиг влево на номер дня)
+    int currentHour = timeinfo.tm_hour;
+    int currentMinute = timeinfo.tm_min;
+    int currentDay = (timeinfo.tm_wday + 6) % 7; // Convert to 0=Monday
     int dayBit = 1 << currentDay;
+    
+    Serial.println("Schedule check: " + String(currentHour) + ":" + 
+                  formatTime(currentMinute) + " Day: " + getDayName(currentDay));
+    
+    bool scheduleActive = false;
     
     for(int i = 0; i < SCHEDULE_COUNT; i++) {
         if(!schedules[i].enabled) continue;
         
-        // Проверяем, действует ли расписание на текущий день
+        // Check if schedule applies to current day
         if(!(schedules[i].days & dayBit)) continue;
         
-        // Конвертируем время в минуты
         int currentTime = currentHour * 60 + currentMinute;
         int onTime = schedules[i].hourOn * 60 + schedules[i].minuteOn;
         int offTime = schedules[i].hourOff * 60 + schedules[i].minuteOff;
         
         bool shouldBeOn = false;
-        
         if(offTime > onTime) {
-            // Обычное расписание в пределах одного дня
+            // Normal schedule within same day
             shouldBeOn = (currentTime >= onTime && currentTime < offTime);
         } else {
-            // Расписание переходит через полночь
+            // Schedule crosses midnight
             shouldBeOn = (currentTime >= onTime || currentTime < offTime);
         }
         
-        // Применяем состояние
-        int shelf = schedules[i].shelf;
-        if(shelf >= 0 && shelf < NUM_SHELVES) {
-            if(relayStates[shelf] != shouldBeOn) {
-                relayStates[shelf] = shouldBeOn;
-                digitalWrite(relayPins[shelf], shouldBeOn ? LOW : HIGH);
-                Serial.println("По расписанию: Полка " + String(shelf+1) + " " + 
-                             (shouldBeOn ? "ВКЛ" : "ВЫКЛ"));
+        int relay = schedules[i].relay;
+        if(relay >= 0 && relay < NUM_RELAYS) {
+            if(relayStates[relay] != shouldBeOn) {
+                relayStates[relay] = shouldBeOn;
+                digitalWrite(relayPins[relay], shouldBeOn ? LOW : HIGH);
+                Serial.println("Schedule " + String(i) + ": Relay " + String(relay+1) + 
+                             " " + (shouldBeOn ? "ON" : "OFF") + 
+                             " (Time: " + String(currentHour) + ":" + formatTime(currentMinute) + 
+                             " Scheduled: " + String(schedules[i].hourOn) + ":" + 
+                             formatTime(schedules[i].minuteOn) + "-" + 
+                             String(schedules[i].hourOff) + ":" + formatTime(schedules[i].minuteOff) + ")");
+                scheduleActive = true;
             }
         }
+    }
+    
+    if(!scheduleActive) {
+        Serial.println("No active schedules triggered");
     }
 }
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("\nСтарт системы освещения");
+    Serial.println("\nStarting Relay Controller...");
+    Serial.println("Initializing...");
     
-    // Инициализация пинов реле
-    for(int i = 0; i < NUM_SHELVES; i++) {
+    // Initialize relays
+    for(int i = 0; i < NUM_RELAYS; i++) {
         pinMode(relayPins[i], OUTPUT);
-        digitalWrite(relayPins[i], HIGH); // Выключаем реле (активный низкий уровень)
+        digitalWrite(relayPins[i], HIGH); // Turn OFF (active LOW)
+        Serial.println("Initialized Relay " + String(i+1) + " on pin D" + String(relayPins[i]));
     }
     
-    // Настройка времени
-    configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    // Configure time
+    configTime(TIME_ZONE * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    Serial.println("Configuring time...");
+    delay(2000); // Wait for time sync
     
-    // Загрузка расписаний из EEPROM
+    // Check time
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    if(timeinfo.tm_year < 121) {
+        Serial.println("Time not synchronized yet");
+    } else {
+        Serial.println("Time synchronized: " + getFormattedTime());
+    }
+    
+    // Load schedules
     loadSchedules();
     
-    // Настройка WiFi через WiFiManager
+    // WiFi setup
     WiFiManager wifiManager;
     wifiManager.setTimeout(180);
     
-    if(!wifiManager.autoConnect("ShelfLight", "12345678")) {
-        Serial.println("Не удалось подключиться, запуск точки доступа");
+    if(!wifiManager.autoConnect("RelayController", "12345678")) {
+        Serial.println("Failed to connect, restarting...");
         delay(3000);
         ESP.restart();
     }
     
-    Serial.println("WiFi подключен!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("WiFi connected!");
+    Serial.println("SSID: " + WiFi.SSID());
+    Serial.println("IP: " + WiFi.localIP().toString());
+    Serial.println("RSSI: " + String(WiFi.RSSI()) + " dBm");
     
-    // Настройка веб-сервера
+    // Web server routes
     server.on("/", handleRoot);
     server.on("/control", handleControl);
     server.on("/schedule", handleSchedule);
+    server.on("/gettime", handleGetTime);
     server.on("/addschedule", handleAddSchedule);
     server.on("/deleteschedule", handleDeleteSchedule);
     server.on("/config", handleConfig);
@@ -669,7 +838,8 @@ void setup() {
     server.on("/resetwifi", handleResetWiFi);
     server.begin();
     
-    Serial.println("Веб-сервер запущен");
+    Serial.println("Web server started on port 80");
+    Serial.println("System ready!");
 }
 
 void loop() {
